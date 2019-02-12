@@ -1,0 +1,156 @@
+---
+title: "R Notebook"
+output: rmarkdown::github_document
+
+---
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+
+Let's load the packages
+```{r}
+library(survival)
+library(tidyverse)
+library(limma)
+library(survminer)
+```
+Load files:
+```{r}
+setwd('C:/Users/Nirad/Downloads')
+
+RNA<-read.table(paste('RNA/',list.files('RNA')[1],sep=''),row.names=1,header=T,sep='\t')
+RNA<-RNA[-c(1),]
+genes<-gsub('\\|.*','',rownames(RNA))
+
+
+clinical<-t(read.table(paste('Clinical/',list.files('Clinical')[3],sep=''),quote='',row.names=1,header=T,sep='\t',stringsAsFactors = F))
+clinical<-as.data.frame(clinical)
+```
+
+
+Is the sample normal or tumor?  Also, let's run Limma Voom for normalization, and use the convert function to convert data to numeric from factor
+
+```{r}
+sample_type<-substring(colnames(RNA),14,14)
+factors<-ifelse(substr(colnames(RNA),14,14)==0,1,0)
+design<-model.matrix(~1+factors)
+convert<-function(data){
+  as.numeric(as.character(data))
+}
+RNA<-apply(RNA,2,convert)
+rownames(RNA)<-genes
+v<-voom(RNA,design,plot=T)$E
+
+```
+
+```{r}
+head(v)
+```
+
+Scale Voom's output by using the scale function, which will subtract mean and divide by the standard deviation
+```{r}
+v_scaled<-scale(t(v))
+v_scaled<-t(v_scaled)
+colnames(v_scaled)<-gsub('\\.','-',tolower(substr(colnames(v_scaled),1,12)))
+
+
+```
+Is scaled data normal?
+```{r}
+hist(v_scaled,breaks=30)
+```
+```{r}
+head(v_scaled[1,1])
+```
+
+Create a new data frame, all_clin
+
+```{r}
+ind_keep<-grep('days_to_new_tumor_event_after_initial_treatment',colnames(clinical))
+keep_minimum<-function(data){
+  if(sum(is.na(data))==length(data)){return(NA)}
+         
+  else{
+    return(min(data,na.rm=TRUE))
+  }
+  
+}
+
+
+
+new_tumor_collapsed<-apply(as.matrix(clinical[,ind_keep]),1,keep_minimum)
+ind_keep <- grep('days_to_death',colnames(clinical))
+death_collapsed<-apply(as.matrix(clinical[,ind_keep]),1,keep_minimum)
+ind_keep <- grep('days_to_last_followup',colnames(clinical))
+fl<-apply(as.matrix(clinical[,ind_keep]),1,keep_minimum)
+all_clin <-data.frame(new_tumor_days=new_tumor_collapsed,death_days=death_collapsed,followup_days=fl)
+all_clin$new_time <- c()
+for (i in 1:length(as.numeric(as.character(all_clin$new_tumor_days)))){
+  all_clin$new_time[i] <- ifelse ( is.na(as.numeric(as.character(all_clin$new_tumor_days))[i]),
+                                   as.numeric(as.character(all_clin$followUp_days))[i],as.numeric(as.character(all_clin$new_tumor_days))[i])
+}
+all_clin$new_death <- c()
+for (i in 1:length(as.numeric(as.character(all_clin$death_days)))){
+  all_clin$new_death[i] <- ifelse ( is.na(as.numeric(as.character(all_clin$death_days))[i]),
+                                    as.numeric(as.character(all_clin$followUp_days))[i],as.numeric(as.character(all_clin$death_days))[i])
+}
+all_clin$death_event <- ifelse(clinical$patient.vital_status == 'alive', 0,1)
+rownames(all_clin) <- clinical$patient.bcr_patient_barcode
+
+```
+Create a new data frame called data_feed.  We will use it for Cox Regression as well as for creating charts.
+
+
+```{r}
+event_rna <- t(apply(v_scaled, 1, function(x) ifelse(abs(x) > 1.96,1,0)))
+ind_tum <- which(unique(colnames(v_scaled)) %in% rownames(all_clin))
+ind_clin <- which(rownames(all_clin) %in% colnames(v_scaled))
+ind_gene <- which(gsub('\\|.*','',rownames(v_scaled))=='TP53')
+ind_gene2<-which(gsub('\\|.*','',rownames(v_scaled))=='TSC1')
+data_feed<-data.frame(new_death=all_clin$new_death[ind_clin],
+                      death_event=all_clin$death_even[ind_clin],
+                      event_rna=event_rna[ind_gene,ind_tum],event_rna2=event_rna[ind_gene2,ind_tum])
+```
+
+
+
+```{r}
+
+```
+
+Kaplan-Meier plot below.
+```{r}
+ggsurvplot(survfit(Surv(data_feed$new_death,data_feed$death_event)~data_feed$event_rna),data=data_feed,pval=T)
+
+```
+
+
+Various Cox Regression Summaries, first for TP53:
+```{r}
+res.cox<-coxph(Surv(data_feed$new_death,data_feed$death_event)~data_feed$event_rna,data=data_feed)
+summary(res.cox)
+
+```
+ Univariate Cox Regression for TSC1
+ 
+ 
+```{r}
+res.cox2<-coxph(Surv(data_feed$new_death,data_feed$death_event)~data_feed$event_rna2,data=data_feed)
+summary(res.cox2)
+```
+
+Finally, multivariate regression for the two genes above:
+
+```{r}
+res.cox3<-coxph(Surv(new_death,death_event)~event_rna+event_rna2,data=data_feed)
+summary(res.cox3)
+```
+
+```{r}
+ggforest(res.cox3,data=data_feed)
+```
+
